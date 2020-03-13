@@ -6,7 +6,7 @@ import threading
 import logging
 import re
 
-from botocore.vendored import requests
+import requests
 import boto3
 
 # semaphore limit of 5, picked this number arbitrarily
@@ -23,47 +23,23 @@ PD_API_KEY = boto3.client('ssm').get_parameters(
     Names=[os.environ['PD_API_KEY_NAME']],
     WithDecryption=True)['Parameters'][0]['Value']
 
-
-# Get the Current User on-call for a given schedule
-def get_user(schedule_id):
+def get_pd_schedule_json(schedule_id):
     global PD_API_KEY
     headers = {
         'Accept': 'application/vnd.pagerduty+json;version=2',
         'Authorization': 'Token token={token}'.format(token=PD_API_KEY)
     }
-    normal_url = 'https://api.pagerduty.com/schedules/{0}/users'.format(
-        schedule_id
-    )
-    override_url = 'https://api.pagerduty.com/schedules/{0}/overrides'.format(
-        schedule_id
-    )
-    # This value should be less than the running interval
-    # It is best to use UTC for the datetime object
+    url = 'https://api.pagerduty.com/schedules/{0}'.format(schedule_id)
     now = datetime.now(timezone.utc)
-    since = now - timedelta(minutes=1)  # One minute ago
     payload = {}
-    payload['since'] = since.isoformat()
-    payload['until'] = now.isoformat()
-    normal = requests.get(normal_url, headers=headers, params=payload)
-    if normal.status_code == 404:
-        logger.critical("ABORT: Not a valid schedule: {}".format(schedule_id))
-        return False
+    payload['since'] = now
+    payload['until'] = now
+    r = requests.get(url, headers=headers, params=payload)
     try:
-        username = normal.json()['users'][0]['name']
-        # Check for overrides
-        # If there is *any* override, then the above username is an override
-        # over the normal schedule. The problem must be approached this way
-        # because the /overrides endpoint does not guarentee an order of the
-        # output.
-        override = requests.get(override_url, headers=headers, params=payload)
-        if override.json()['overrides']:  # is not empty list
-            username = username + " (Override)"
-    except IndexError:
-        username = "No One :thisisfine:"
-
-    logger.info("Currently on call: {}".format(username))
-    return username
-
+        return r.json()['schedule']
+    except (KeyError, ValueError):
+        logger.debug('Error retrieving schedule. Status code: {}'.format(r.status_code))
+        return None
 
 def get_pd_schedule_name(schedule_id):
     global PD_API_KEY
@@ -74,7 +50,11 @@ def get_pd_schedule_name(schedule_id):
     url = 'https://api.pagerduty.com/schedules/{0}'.format(schedule_id)
     r = requests.get(url, headers=headers)
     try:
-        return r.json()['schedule']['name']
+        json = r.json()
+        schedule_name = json['schedule']['name']
+        schedule_layers = json['schedule']['schedule_layers']
+        rendered_schedule_entries = schedule_layers['rendered_schedule_entries']
+        logger.debug("rendered_schedule_entries: {}".format(rendered_schedule_entries))
     except KeyError:
         logger.debug(r.status_code)
         logger.debug(r.json())
@@ -157,49 +137,41 @@ def update_slack_topic(channel, proposed_update):
         return None
 
 
-def figure_out_schedule(s):
-    # Purpose here is to find the schedule id if given a human readable name
-    # fingers crossed that this regex holds for awhile. "PXXXXXX"
-    if re.match('^P[a-zA-Z0-9]{6}', s):
-        return s
-    global PD_API_KEY
-    headers = {
-        'Accept': 'application/vnd.pagerduty+json;version=2',
-        'Authorization': 'Token token={token}'.format(token=PD_API_KEY)
-    }
-    url = 'https://api.pagerduty.com/schedules/'
-    payload = {}
-    payload['query'] = s
-    # If there is no override, then check the schedule directly
-    r = requests.get(url, headers=headers, params=payload)
-    try:
-        # This is fragile. fuzzy search may not do what you want
-        sid = r.json()['schedules'][0]['id']
-    except IndexError:
-        logger.debug("Schedule Not Found for: {}".format(s))
-        sid = None
-    return sid
-
-
 def do_work(obj):
     # entrypoint of the thread
     sema.acquire()
     logger.debug("Operating on {}".format(obj))
     # schedule will ALWAYS be there, it is a ddb primarykey
-    schedule = figure_out_schedule(obj['schedule']['S'])
-    if schedule:
-        username = get_user(schedule)
-    else:
+    schedule_json = get_pd_schedule_json(obj['schedule']['S'])
+    if schedule_json is None:
         logger.critical("Exiting: Schedule not found or not valid, see previous errors")
         return 127
-    try:
-        sched_name = obj['sched_name']['S']
-    except:
-        sched_name = get_pd_schedule_name(schedule)
+
+    schedule_layers = schedule_json.get('schedule_layers')
+    if schedule_layers is None or len(schedule_layers) == 0:
+        logger.critical("Exiting: Schedule not found or not valid, schedule_json: {}".format(schedule_json))
+        return 127
+
+    rendered_schedule_entries = schedule_layers[0].get('rendered_schedule_entries')
+    if rendered_schedule_entries is None or len(rendered_schedule_entries) == 0:
+        logger.critical("Exiting: No rendered_schedule_entries found, schedule_json: {}".format(schedule_json))
+        return 127
+
+    current_oncall = rendered_schedule_entries[0]
+    start = current_oncall['start']
+    parse_format = '%Y-%m-%dT%H:%M:%S%z'
+    render_format = '%m/%d/%Y %H:%M%p'
+    start_time = datetime.strptime(start, parse_format).strftime(render_format)
+    end = current_oncall['end']
+    end_time = datetime.strptime(end, parse_format).strftime(render_format)
+    user = current_oncall['user']
+    username = user['summary']
+
     if username is not None:  # then it is valid and update the chat topic
-        topic = "{} is on-call for {}".format(
+        topic = "{} is on-call from {} to {}".format(
             username,
-            sched_name
+            start_time,
+            end_time
         )
         if 'slack' in obj.keys():
             slack = obj['slack']['S']
@@ -223,3 +195,4 @@ def handler(event, context):
     # Start threads and wait for all to finish
     [t.start() for t in threads]
     [t.join() for t in threads]
+

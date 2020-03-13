@@ -1,14 +1,19 @@
 STACKNAME_BASE=pagerduty-oncall-chat-topic
-REGION="ca-central-1"
+REGION="us-east-1"
 # Bucket in REGION that is used for deployment (`pd-oncall-chat-topic` is already used)
 BUCKET=$(STACKNAME_BASE)
 SSMKeyArn=$(shell aws kms --region $(REGION) describe-key --key-id alias/aws/ssm --query KeyMetadata.Arn)
 MD5=$(shell md5sum lambda/*.py | md5sum | cut -d ' ' -f 1)
 
-
 deploy:
 	cd lambda && \
-		zip -r9 /tmp/deployment.zip *.py && \
+    rm -rf package && \
+    mkdir package && \
+    pip install --target ./package requests && \
+    cd package && \
+    zip -r9 /tmp/deployment.zip . && \
+    cd .. && \
+		zip -g /tmp/deployment.zip *.py && \
 		aws s3 cp --region $(REGION) /tmp/deployment.zip \
 			s3://$(BUCKET)/$(MD5) && \
 		rm -rf /tmp/deployment.zip
