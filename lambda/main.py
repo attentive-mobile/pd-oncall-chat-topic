@@ -152,8 +152,14 @@ def do_work(obj):
         logger.critical("Exiting: Schedule not found or not valid, schedule_json: {}".format(schedule_json))
         return 127
 
-    rendered_schedule_entries = schedule_layers[0].get('rendered_schedule_entries')
-    if rendered_schedule_entries is None or len(rendered_schedule_entries) == 0:
+    rendered_schedule_entries = None
+    for layer in schedule_layers:
+        entries = layer.get('rendered_schedule_entries')
+        if entries is not None and len(entries) > 0:
+            rendered_schedule_entries = entries
+            break
+
+    if rendered_schedule_entries is None:
         logger.critical("Exiting: No rendered_schedule_entries found, schedule_json: {}".format(schedule_json))
         return 127
 
