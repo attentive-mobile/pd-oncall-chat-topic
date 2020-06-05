@@ -1,22 +1,19 @@
-STACKNAME_BASE=pagerduty-oncall-chat-topic
+STACKNAME_BASE=attentive-pagerduty-oncall-chat-topic
 REGION="us-east-1"
 # Bucket in REGION that is used for deployment (`pd-oncall-chat-topic` is already used)
 BUCKET=$(STACKNAME_BASE)
 SSMKeyArn=$(shell aws kms --region $(REGION) describe-key --key-id alias/aws/ssm --query KeyMetadata.Arn)
 MD5=$(shell md5sum lambda/*.py | md5sum | cut -d ' ' -f 1)
 
-deploy:
-	cd lambda && \
-    rm -rf package && \
-    mkdir package && \
-    pip install --target ./package requests && \
-    cd package && \
-    zip -r9 /tmp/deployment.zip . && \
-    cd .. && \
-		zip -g /tmp/deployment.zip *.py && \
-		aws s3 cp --region $(REGION) /tmp/deployment.zip \
-			s3://$(BUCKET)/$(MD5) && \
-		rm -rf /tmp/deployment.zip
+deployment.zip: lambda/main.py
+	rm -rf ./lambda-deps
+	mkdir ./lambda-deps
+	pip3 install --target ./lambda-deps requests
+	cd ./lambda-deps && zip -r9 ../deployment.zip .
+	cd lambda && zip -g ../deployment.zip *.py
+
+deploy: deployment.zip
+	aws s3 cp --region $(REGION) $^ s3://$(BUCKET)/$(MD5)
 	aws cloudformation deploy \
 		--template-file deployment.yml \
 		--stack-name $(STACKNAME_BASE) \
@@ -27,7 +24,7 @@ deploy:
 		"SSMKeyArn"=$(SSMKeyArn) \
 		"PDSSMKeyName"=$(STACKNAME_BASE) \
 		"SlackSSMKeyName"=$(STACKNAME_BASE)-slack \
-		--capabilities CAPABILITY_IAM || exit 0
+		--capabilities CAPABILITY_IAM
 
 discover:
 	aws cloudformation --region $(REGION) \
@@ -37,5 +34,6 @@ discover:
 
 put-pd-key:
 	./scripts/put-ssm.sh $(STACKNAME_BASE) $(STACKNAME_BASE) $(REGION)
+
 put-slack-key:
 	./scripts/put-ssm.sh $(STACKNAME_BASE)-slack $(STACKNAME_BASE) $(REGION)
