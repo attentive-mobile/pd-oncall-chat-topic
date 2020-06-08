@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 import threading
 import logging
 import re
@@ -30,7 +30,10 @@ def get_pd_schedule_json(schedule_id):
         'Authorization': 'Token token={token}'.format(token=PD_API_KEY)
     }
     url = 'https://api.pagerduty.com/oncalls'
-    payload = {'schedule_ids[]': schedule_id}
+    payload = {
+        'time_zone': 'America/New_York',
+        'schedule_ids[]': schedule_id
+    }
     r = requests.get(url, headers=headers, data=payload)
     try:
         return r.json()['oncalls'][0]
