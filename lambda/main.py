@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 import threading
 import logging
 import re
@@ -29,35 +29,16 @@ def get_pd_schedule_json(schedule_id):
         'Accept': 'application/vnd.pagerduty+json;version=2',
         'Authorization': 'Token token={token}'.format(token=PD_API_KEY)
     }
-    url = 'https://api.pagerduty.com/schedules/{0}'.format(schedule_id)
-    now = datetime.now(timezone.utc)
-    payload = {}
-    payload['since'] = now
-    payload['until'] = now
-    r = requests.get(url, headers=headers, params=payload)
-    try:
-        return r.json()['schedule']
-    except (KeyError, ValueError):
-        logger.debug('Error retrieving schedule. Status code: {}'.format(r.status_code))
-        return None
-
-def get_pd_schedule_name(schedule_id):
-    global PD_API_KEY
-    headers = {
-        'Accept': 'application/vnd.pagerduty+json;version=2',
-        'Authorization': 'Token token={token}'.format(token=PD_API_KEY)
+    url = 'https://api.pagerduty.com/oncalls'
+    payload = {
+        'time_zone': 'America/New_York',
+        'schedule_ids[]': schedule_id
     }
-    url = 'https://api.pagerduty.com/schedules/{0}'.format(schedule_id)
-    r = requests.get(url, headers=headers)
+    r = requests.get(url, headers=headers, data=payload)
     try:
-        json = r.json()
-        schedule_name = json['schedule']['name']
-        schedule_layers = json['schedule']['schedule_layers']
-        rendered_schedule_entries = schedule_layers['rendered_schedule_entries']
-        logger.debug("rendered_schedule_entries: {}".format(rendered_schedule_entries))
-    except KeyError:
-        logger.debug(r.status_code)
-        logger.debug(r.json())
+        return r.json()['oncalls'][0]
+    except (KeyError, ValueError, IndexError):
+        logger.debug('Error retrieving schedule. Status code: {}'.format(r.status_code))
         return None
 
 
@@ -144,34 +125,16 @@ def do_work(obj):
     # schedule will ALWAYS be there, it is a ddb primarykey
     schedule_json = get_pd_schedule_json(obj['schedule']['S'])
     if schedule_json is None:
-        logger.critical("Exiting: Schedule not found or not valid, see previous errors")
+        logger.critical("Exiting: Schedule {} not found or not valid, see previous errors".format(obj['schedule']['S']))
         return 127
 
-    schedule_layers = schedule_json.get('schedule_layers')
-    if schedule_layers is None or len(schedule_layers) == 0:
-        logger.critical("Exiting: Schedule not found or not valid, schedule_json: {}".format(schedule_json))
-        return 127
-
-    rendered_schedule_entries = None
-    for layer in schedule_layers:
-        entries = layer.get('rendered_schedule_entries')
-        if entries is not None and len(entries) > 0:
-            rendered_schedule_entries = entries
-            break
-
-    if rendered_schedule_entries is None:
-        logger.critical("Exiting: No rendered_schedule_entries found, schedule_json: {}".format(schedule_json))
-        return 127
-
-    current_oncall = rendered_schedule_entries[0]
-    start = current_oncall['start']
     parse_format = '%Y-%m-%dT%H:%M:%S%z'
     render_format = '%m/%d/%Y %H:%M%p'
+    start = schedule_json['start']
     start_time = datetime.strptime(start, parse_format).strftime(render_format)
-    end = current_oncall['end']
+    end = schedule_json['end']
     end_time = datetime.strptime(end, parse_format).strftime(render_format)
-    user = current_oncall['user']
-    username = user['summary']
+    username = schedule_json['user']['summary']
 
     if username is not None:  # then it is valid and update the chat topic
         topic = "{} is on-call from {} to {}".format(
